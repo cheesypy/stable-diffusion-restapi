@@ -15,6 +15,7 @@ import modules.img2img
 
 import modules.lowvram
 import modules.paths
+import modules.rest.rest_api
 import modules.scripts
 import modules.sd_hijack
 import modules.sd_models
@@ -91,7 +92,7 @@ def webui():
 
         demo = modules.ui.create_ui(wrap_gradio_gpu_call=wrap_gradio_gpu_call)
         
-        demo.launch(
+        [fastAPIApp, local_url, share_url] = demo.launch(
             share=cmd_opts.share,
             server_name="0.0.0.0" if cmd_opts.listen else None,
             server_port=cmd_opts.port,
@@ -100,6 +101,11 @@ def webui():
             inbrowser=cmd_opts.autolaunch,
             prevent_thread_lock=True
         )
+
+        if cmd_opts.rest_api:
+            modules.rest.rest_api.launch_api(fastAPIApp, local_url, share_url)
+
+        print(f"Running Server")
 
         while 1:
             time.sleep(0.5)
