@@ -11,7 +11,7 @@ import cv2
 from skimage import exposure
 
 import modules.sd_hijack
-from modules import devices, prompt_parser, masking, sd_samplers
+from modules import devices, prompt_parser, masking, sd_samplers, lowvram
 from modules.sd_hijack import model_hijack
 from modules.shared import opts, cmd_opts, state
 import modules.shared as shared
@@ -121,6 +121,8 @@ class Processed:
         self.denoising_strength = getattr(p, 'denoising_strength', None)
         self.extra_generation_params = p.extra_generation_params
         self.index_of_first_image = index_of_first_image
+        self.styles = p.styles
+        self.job_timestamp = state.job_timestamp
 
         self.eta = p.eta
         self.ddim_discretize = p.ddim_discretize
@@ -165,6 +167,8 @@ class Processed:
             "extra_generation_params": self.extra_generation_params,
             "index_of_first_image": self.index_of_first_image,
             "infotexts": self.infotexts,
+            "styles": self.styles,
+            "job_timestamp": self.job_timestamp,
         }
 
         return json.dumps(obj)
@@ -382,6 +386,13 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             x_samples_ddim = p.sd_model.decode_first_stage(samples_ddim)
             x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
 
+            del samples_ddim
+
+            if shared.cmd_opts.lowvram or shared.cmd_opts.medvram:
+                lowvram.send_everything_to_cpu()
+
+            devices.torch_gc()
+
             if opts.filter_nsfw:
                 import modules.safety as safety
                 x_samples_ddim = modules.safety.censor_batch(x_samples_ddim)
@@ -423,8 +434,14 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
                 if opts.samples_save and not p.do_not_save_samples:
                     images.save_image(image, p.outpath_samples, "", seeds[i], prompts[i], opts.samples_format, info=infotext(n, i), p=p)
 
-                infotexts.append(infotext(n, i))
+                text = infotext(n, i)
+                infotexts.append(text)
+                image.info["parameters"] = text
                 output_images.append(image)
+
+            del x_samples_ddim 
+
+            devices.torch_gc()
 
             state.nextjob()
 
@@ -436,7 +453,9 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             grid = images.image_grid(output_images, p.batch_size)
 
             if opts.return_grid:
-                infotexts.insert(0, infotext())
+                text = infotext()
+                infotexts.insert(0, text)
+                grid.info["parameters"] = text
                 output_images.insert(0, grid)
                 index_of_first_image = 1
 
@@ -662,5 +681,8 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
         if self.mask is not None:
             samples = samples * self.nmask + self.init_latent * self.mask
+
+        del x
+        devices.torch_gc()
 
         return samples
