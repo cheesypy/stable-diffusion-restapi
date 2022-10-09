@@ -43,6 +43,9 @@ parser.add_argument("--realesrgan-models-path", type=str, help="Path to director
 parser.add_argument("--scunet-models-path", type=str, help="Path to directory with ScuNET model file(s).", default=os.path.join(models_path, 'ScuNET'))
 parser.add_argument("--swinir-models-path", type=str, help="Path to directory with SwinIR model file(s).", default=os.path.join(models_path, 'SwinIR'))
 parser.add_argument("--ldsr-models-path", type=str, help="Path to directory with LDSR model file(s).", default=os.path.join(models_path, 'LDSR'))
+parser.add_argument("--xformers", action='store_true', help="enable xformers for cross attention layers")
+parser.add_argument("--force-enable-xformers", action='store_true', help="enable xformers for cross attention layers regardless of whether the checking code thinks you can run it; do not make bug reports if this fails to work")
+parser.add_argument("--deepdanbooru", action='store_true', help="enable deepdanbooru interrogator")
 parser.add_argument("--opt-split-attention", action='store_true', help="force-enables cross-attention layer optimization. By default, it's on for torch.cuda and off for other torch devices.")
 parser.add_argument("--disable-opt-split-attention", action='store_true', help="force-disables cross-attention layer optimization")
 parser.add_argument("--opt-split-attention-v1", action='store_true', help="enable older version of split attention optimization that does not consume all the VRAM it can find")
@@ -73,17 +76,15 @@ device = devices.device
 
 batch_cond_uncond = cmd_opts.always_batch_cond_uncond or not (cmd_opts.lowvram or cmd_opts.medvram)
 parallel_processing_allowed = not cmd_opts.lowvram and not cmd_opts.medvram
-
+xformers_available = False
 config_filename = cmd_opts.ui_settings_file
 
-hypernetworks = hypernetwork.load_hypernetworks(os.path.join(models_path, 'hypernetworks'))
-
-
-def selected_hypernetwork():
-    return hypernetworks.get(opts.sd_hypernetwork, None)
+hypernetworks = hypernetwork.list_hypernetworks(os.path.join(models_path, 'hypernetworks'))
+loaded_hypernetwork = None
 
 
 class State:
+    skipped = False
     interrupted = False
     job = ""
     job_no = 0
@@ -95,6 +96,9 @@ class State:
     current_image = None
     current_image_sampling_step = 0
     textinfo = None
+
+    def skip(self):
+        self.skipped = True
 
     def interrupt(self):
         self.interrupted = True
@@ -118,8 +122,6 @@ prompt_styles = modules.styles.StyleDatabase(styles_filename)
 interrogator = modules.interrogate.InterrogateModels("interrogate")
 
 face_restorers = []
-# This was moved to webui.py with the other model "setup" calls.
-# modules.sd_models.list_models()
 
 
 def realesrgan_models_names():
@@ -137,9 +139,9 @@ class OptionInfo:
         self.section = None
 
 
-def options_section(section_identifer, options_dict):
+def options_section(section_identifier, options_dict):
     for k, v in options_dict.items():
-        v.section = section_identifer
+        v.section = section_identifier
 
     return options_dict
 
@@ -221,6 +223,7 @@ options_templates.update(options_section(('sd', "Stable Diffusion"), {
     "use_old_emphasis_implementation": OptionInfo(False, "Use old emphasis implementation. Can be useful to reproduce old seeds."),
     "enable_batch_seeds": OptionInfo(True, "Make K-diffusion samplers produce same images in a batch as when making a single image"),
     "filter_nsfw": OptionInfo(False, "Filter NSFW content"),
+    'CLIP_ignore_last_layers': OptionInfo(0, "Ignore last layers of CLIP model", gr.Slider, {"minimum": 0, "maximum": 5, "step": 1}),
     "random_artist_categories": OptionInfo([], "Allowed categories for random artists selection when using the Roll button", gr.CheckboxGroup, {"choices": artist_db.categories()}),
 }))
 
@@ -235,13 +238,14 @@ options_templates.update(options_section(('interrogate', "Interrogate Options"),
 
 options_templates.update(options_section(('ui', "User interface"), {
     "show_progressbar": OptionInfo(True, "Show progressbar"),
-    "show_progress_every_n_steps": OptionInfo(0, "Show show image creation progress every N sampling steps. Set 0 to disable.", gr.Slider, {"minimum": 0, "maximum": 32, "step": 1}),
+    "show_progress_every_n_steps": OptionInfo(0, "Show image creation progress every N sampling steps. Set 0 to disable.", gr.Slider, {"minimum": 0, "maximum": 32, "step": 1}),
     "return_grid": OptionInfo(True, "Show grid in results for web"),
     "do_not_show_images": OptionInfo(False, "Do not show any images in results for web"),
     "add_model_hash_to_info": OptionInfo(True, "Add model hash to generation information"),
+    "add_model_name_to_info": OptionInfo(False, "Add model name to generation information"),
     "font": OptionInfo("", "Font for image grids that have text"),
     "js_modal_lightbox": OptionInfo(True, "Enable full page image viewer"),
-    "js_modal_lightbox_initialy_zoomed": OptionInfo(True, "Show images zoomed in by default in full page image viewer"),
+    "js_modal_lightbox_initially_zoomed": OptionInfo(True, "Show images zoomed in by default in full page image viewer"),
     "show_progress_in_title": OptionInfo(True, "Show generation progress in window title."),
 }))
 

@@ -5,6 +5,8 @@ import importlib
 import signal
 import threading
 
+from fastapi.middleware.gzip import GZipMiddleware
+
 from modules.paths import script_path
 
 from modules import devices, sd_samplers
@@ -59,6 +61,7 @@ def wrap_gradio_gpu_call(func, extra_outputs=None):
         shared.state.current_latent = None
         shared.state.current_image = None
         shared.state.current_image_sampling_step = 0
+        shared.state.skipped = False
         shared.state.interrupted = False
         shared.state.textinfo = None
 
@@ -80,6 +83,9 @@ modules.scripts.load_scripts(os.path.join(script_path, "scripts"))
 shared.sd_model = modules.sd_models.load_model()
 shared.opts.onchange("sd_model_checkpoint", wrap_queued_call(lambda: modules.sd_models.reload_model_weights(shared.sd_model)))
 
+loaded_hypernetwork = modules.hypernetwork.load_hypernetwork(shared.opts.sd_hypernetwork)
+shared.opts.onchange("sd_hypernetwork", wrap_queued_call(lambda: modules.hypernetwork.load_hypernetwork(shared.opts.sd_hypernetwork)))
+
 
 def webui():
     # make the program just exit at ctrl+c without waiting for anything
@@ -93,7 +99,7 @@ def webui():
 
         demo = modules.ui.create_ui(wrap_gradio_gpu_call=wrap_gradio_gpu_call)
         
-        [fastAPIApp, local_url, share_url] = demo.launch(
+        app,local_url,share_url = demo.launch(
             share=cmd_opts.share,
             server_name="0.0.0.0" if cmd_opts.listen else None,
             server_port=cmd_opts.port,
@@ -102,11 +108,12 @@ def webui():
             inbrowser=cmd_opts.autolaunch,
             prevent_thread_lock=True
         )
+        
+        app.add_middleware(GZipMiddleware,minimum_size=1000)
 
         if cmd_opts.rest_api:
-            modules.rest.rest_api.launch_api(fastAPIApp, local_url, share_url)
-
-        print(f"Running Server")
+            modules.rest.rest_api.launch_api(app, local_url, share_url)
+            print(f"Running Rest Server")
 
         while 1:
             time.sleep(0.5)
